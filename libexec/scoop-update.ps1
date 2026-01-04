@@ -353,14 +353,44 @@ function update($app, $global, $quiet = $false, $independent, $suggested, $use_c
     env_rm $old_manifest $global $architecture
 
     if ($force -and ($old_version -eq $version)) {
-        if (!(Test-Path "$dir/../_$version.old")) {
-            Move-Item "$dir" "$dir/../_$version.old"
-        } else {
+        $appDir = Split-Path $dir
+        $backupBase = Join-Path $appDir "_$version.old"
+        $backup = $backupBase
+        if (Test-Path $backup) {
             $i = 1
-            While (Test-Path "$dir/../_$version.old($i)") {
+            while (Test-Path "$backupBase($i)") {
                 $i++
             }
-            Move-Item "$dir" "$dir/../_$version.old($i)"
+            $backup = "$backupBase($i)"
+        }
+
+        if ((get_config REVERSE_JUNCTION $false) -and !(get_config NO_JUNCTION)) {
+            # reverse_junction layout: preserve the real 'current' directory (if any), and remove version junctions
+            $currentDir = Join-Path $appDir 'current'
+            if (Test-Path $currentDir) {
+                $currentItem = Get-Item -LiteralPath $currentDir -Force -ErrorAction SilentlyContinue
+                if ($currentItem -and -not [String]::IsNullOrEmpty($currentItem.LinkType)) {
+                    attrib $currentDir -R /L | Out-Null
+                    Remove-Item -LiteralPath $currentDir -Recurse -Force -ErrorAction Stop
+                } else {
+                    Move-Item -LiteralPath $currentDir -Destination $backup
+                }
+            }
+
+            if (Test-Path $dir) {
+                $dirItem = Get-Item -LiteralPath $dir -Force -ErrorAction SilentlyContinue
+                if ($dirItem -and -not [String]::IsNullOrEmpty($dirItem.LinkType)) {
+                    attrib $dir -R /L | Out-Null
+                    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction Stop
+                } else {
+                    Move-Item -LiteralPath $dir -Destination $backup
+                }
+            }
+        } else {
+            # default layout: preserve old version directory by renaming it out of the way
+            if (Test-Path $dir) {
+                Move-Item -LiteralPath $dir -Destination $backup
+            }
         }
     }
 

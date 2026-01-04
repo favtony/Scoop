@@ -33,6 +33,11 @@
 # no_junction: $true|$false
 #       The 'current' version alias will not be used. Shims and shortcuts will point to specific version instead.
 #
+# reverse_junction: $true|$false
+#       When set to $true, Scoop will make 'current' a real directory (not a junction) for installs/updates.
+#       The active version directory will be a junction pointing to 'current'. This helps apps that resolve
+#       their real path and behave inconsistently when launched from a junction.
+#
 # scoop_repo: http://github.com/ScoopInstaller/Scoop
 #       Git repository containining scoop source code.
 #       This configuration is useful for custom forks.

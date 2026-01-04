@@ -116,8 +116,13 @@ if (!$apps) { exit 0 }
         }
     }
     if (Test-Path ($currentDir = Join-Path $appDir 'current')) {
-        attrib $currentDir -R /L
-        Remove-Item $currentDir -ErrorAction Stop -Force
+        $currentItem = Get-Item -LiteralPath $currentDir -Force -ErrorAction SilentlyContinue
+        if ($currentItem -and -not [String]::IsNullOrEmpty($currentItem.LinkType)) {
+            attrib $currentDir -R /L | Out-Null
+            Remove-Item -LiteralPath $currentDir -ErrorAction Stop -Force
+        } else {
+            Remove-Item -LiteralPath $currentDir -Recurse -Force -ErrorAction Stop
+        }
     }
     if (!(Get-ChildItem $appDir)) {
         try {

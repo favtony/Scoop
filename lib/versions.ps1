@@ -53,7 +53,48 @@ function Select-CurrentVersion { # 'manifest.ps1'
         if (!(get_config NO_JUNCTION)) {
             $currentVersion = (parse_json "$currentPath\manifest.json").version
             if ($currentVersion -eq 'nightly') {
-                $currentVersion = (Get-Item $currentPath).Target | Split-Path -Leaf
+                $currentItem = Get-Item -LiteralPath $currentPath -Force -ErrorAction SilentlyContinue
+                if ($currentItem -and -not [String]::IsNullOrEmpty($currentItem.LinkType)) {
+                    # Default layout: current is a junction to the real version directory
+                    $target = $currentItem.Target
+                    if ($target -is [array]) {
+                        $target = $target[0]
+                    }
+                    if ($target) {
+                        $currentVersion = Split-Path $target -Leaf
+                    } else {
+                        $currentVersion = $null
+                    }
+                } else {
+                    # reverse_junction layout: current is a directory; the active version is a junction to current
+                    $appPath = appdir $AppName $Global
+                    if ((Test-Path $appPath) -and (Test-Path $currentPath)) {
+                        $currentFull = (Get-Item -LiteralPath $currentPath -Force).FullName.TrimEnd('\')
+                        $links = Get-ChildItem -LiteralPath $appPath -Force -ErrorAction SilentlyContinue |
+                            Where-Object { $_.PSIsContainer -and $_.Name -ne 'current' -and -not [String]::IsNullOrEmpty($_.LinkType) }
+
+                        foreach ($link in $links) {
+                            $target = $link.Target
+                            if ($target -is [array]) {
+                                $target = $target[0]
+                            }
+                            if ([String]::IsNullOrEmpty($target)) {
+                                continue
+                            }
+                            try {
+                                $targetFull = (Get-Item -LiteralPath $target -Force -ErrorAction Stop).FullName.TrimEnd('\')
+                            } catch {
+                                $targetFull = $target.TrimEnd('\')
+                            }
+                            if ($targetFull -ieq $currentFull) {
+                                $currentVersion = $link.Name
+                                break
+                            }
+                        }
+                    } else {
+                        $currentVersion = $null
+                    }
+                }
             }
         }
         if ($null -eq $currentVersion) {

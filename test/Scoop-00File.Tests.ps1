@@ -5,6 +5,7 @@ param(
 BeforeDiscovery {
     $project_file_exclusions = @(
         '[\\/]\.git[\\/]',
+        '[\\/]\.specstory[\\/]',
         '\.sublime-workspace$',
         '\.DS_Store$',
         'supporting(\\|/)validator(\\|/)packages(\\|/)*'

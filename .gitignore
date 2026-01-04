@@ -2,6 +2,8 @@
 .DS_Store
 ._.DS_Store
 scoop.sublime-workspace
+.cursorindexingignore
+.specstory/
 test/installer/tmp/*
 test/tmp/*
 *~

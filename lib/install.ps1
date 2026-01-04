@@ -56,6 +56,10 @@ function install_app($app, $architecture, $global, $suggested, $use_cache = $tru
     Invoke-Installer -Path $dir -Name $fname -Manifest $manifest -ProcessorArchitecture $architecture -AppName $app -Global:$global
     ensure_install_dir_not_in_path $dir $global
     $dir = link_current $dir
+    if ((get_config REVERSE_JUNCTION $false) -and !(get_config NO_JUNCTION)) {
+        # In reverse_junction layout, 'current' is the real directory.
+        $original_dir = $dir
+    }
     create_shims $manifest $dir $global $architecture
     create_startmenu_shortcuts $manifest $dir $global $architecture
     install_psmodule $manifest $dir $global
@@ -230,31 +234,231 @@ function rm_shims($app, $manifest, $global, $arch) {
     }
 }
 
-# Creates or updates the directory junction for [app]/current,
-# pointing to the specified version directory for the app.
+# --- junction helpers ---
+function Get-DirectoryLinkType([string] $Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or $item -isnot [System.IO.DirectoryInfo]) {
+        return $null
+    }
+    return $item.LinkType
+}
+function Get-DirectoryLinkTarget([string] $Path) {
+    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
+    if ($null -eq $item -or $item -isnot [System.IO.DirectoryInfo] -or [String]::IsNullOrEmpty($item.LinkType)) {
+        return $null
+    }
+    $target = $item.Target
+    if ($target -is [array]) {
+        $target = $target[0]
+    }
+    return $target
+}
+function Remove-DirectoryLink([string] $Path) {
+    $linkType = Get-DirectoryLinkType $Path
+    if ([String]::IsNullOrEmpty($linkType)) {
+        return $false
+    }
+
+    # remove read-only attribute on link
+    attrib $Path -R /L | Out-Null
+
+    # remove the junction
+    Remove-Item -LiteralPath $Path -Recurse -Force -ErrorAction Stop
+    return $true
+}
+function Get-UniqueDirectoryPath([string] $Path) {
+    if (!(Test-Path $Path)) {
+        return $Path
+    }
+    $i = 1
+    while (Test-Path "$Path($i)") {
+        $i++
+    }
+    return "$Path($i)"
+}
+function Find-ActiveVersionFromReverseLayout([string] $AppDir, [string] $CurrentDir) {
+    if (!(Test-Path $AppDir) -or !(Test-Path $CurrentDir)) {
+        return $null
+    }
+
+    $currentFull = (Get-Item -LiteralPath $CurrentDir -Force).FullName.TrimEnd('\')
+    $links = Get-ChildItem -LiteralPath $AppDir -Force -ErrorAction SilentlyContinue |
+        Where-Object { $_.PSIsContainer -and $_.Name -ne 'current' -and -not [String]::IsNullOrEmpty($_.LinkType) }
+
+    foreach ($link in $links) {
+        $target = $link.Target
+        if ($target -is [array]) {
+            $target = $target[0]
+        }
+        if ([String]::IsNullOrEmpty($target)) {
+            continue
+        }
+        try {
+            $targetFull = (Get-Item -LiteralPath $target -Force -ErrorAction Stop).FullName.TrimEnd('\')
+        } catch {
+            $targetFull = $target.TrimEnd('\')
+        }
+        if ($targetFull -ieq $currentFull) {
+            return $link.Name
+        }
+    }
+
+    return $null
+}
+function Get-CurrentVersionFromManifest([string] $CurrentDir) {
+    $manifestPath = Join-Path $CurrentDir 'manifest.json'
+    if (Test-Path $manifestPath) {
+        $m = parse_json $manifestPath
+        if ($m -and $m.version) {
+            return $m.version
+        }
+    }
+    return $null
+}
+function Get-AppDirForCurrentOps([string] $Path) {
+    # Accept both app directory and version directory as input.
+    # If '<path>\current' exists, treat '<path>' as app directory.
+    $current = Join-Path $Path 'current'
+    if (Test-Path $current) {
+        return $Path
+    }
+    return (Split-Path $Path)
+}
+
+# Creates or updates the "current" pointer for an app.
 #
-# Returns the 'current' junction directory if in use, otherwise
-# the version directory.
+# Default layout:
+#   <app>\current  -> (junction) <app>\<version>
+#
+# When config 'reverse_junction' is enabled:
+#   <app>\current  -> (directory)
+#   <app>\<version> -> (junction) <app>\current
+#
+# Returns the directory used for shims/shortcuts/env (usually '<app>\current').
 function link_current($versiondir) {
     if (get_config NO_JUNCTION) { return $versiondir.ToString() }
 
-    $currentdir = "$(Split-Path $versiondir)\current"
+    $reverse = get_config REVERSE_JUNCTION $false
 
-    Write-Host "Linking $(friendly_path $currentdir) => $(friendly_path $versiondir)"
+    $versiondir = $versiondir.ToString()
+    $appdir = Split-Path $versiondir
+    $version = Split-Path $versiondir -Leaf
+    $currentdir = Join-Path $appdir 'current'
 
     if ($currentdir -eq $versiondir) {
         abort "Error: Version 'current' is not allowed!"
     }
 
-    if (Test-Path $currentdir) {
-        # remove the junction
-        attrib -R /L $currentdir
-        Remove-Item $currentdir -Recurse -Force -ErrorAction Stop
-    }
+    if ($reverse) {
+        Write-Host "Linking (reverse) $(friendly_path $versiondir) => $(friendly_path $currentdir)"
 
-    New-DirectoryJunction $currentdir $versiondir | Out-Null
-    attrib $currentdir +R /L
-    return $currentdir
+        # If the requested version is already the active one (version junction -> current dir), just return.
+        $verTarget = Get-DirectoryLinkTarget $versiondir
+        if ($verTarget -and (Test-Path $currentdir) -and [String]::IsNullOrEmpty((Get-DirectoryLinkType $currentdir))) {
+            try {
+                $currFull = (Get-Item -LiteralPath $currentdir -Force -ErrorAction Stop).FullName.TrimEnd('\')
+                $verTFull = (Get-Item -LiteralPath $verTarget -Force -ErrorAction Stop).FullName.TrimEnd('\')
+                if ($verTFull -ieq $currFull) {
+                    return $currentdir
+                }
+            } catch {
+                # ignore and continue with migration logic
+            }
+        }
+
+        # Ensure the version path is not a link (we need to rename it later)
+        if ((Test-Path $versiondir) -and -not [String]::IsNullOrEmpty((Get-DirectoryLinkType $versiondir))) {
+            Remove-DirectoryLink $versiondir | Out-Null
+        }
+
+        # If current exists:
+        # - remove it when it's a link (forward layout)
+        # - otherwise preserve it by moving it back to the active version directory
+        if (Test-Path $currentdir) {
+            if (-not [String]::IsNullOrEmpty((Get-DirectoryLinkType $currentdir))) {
+                Remove-DirectoryLink $currentdir | Out-Null
+            } else {
+                $oldVersion = Find-ActiveVersionFromReverseLayout $appdir $currentdir
+                if (!$oldVersion) {
+                    $oldVersion = Get-CurrentVersionFromManifest $currentdir
+                }
+
+                if ($oldVersion) {
+                    $oldLink = Join-Path $appdir $oldVersion
+                    if ((Test-Path $oldLink) -and -not [String]::IsNullOrEmpty((Get-DirectoryLinkType $oldLink))) {
+                        Remove-DirectoryLink $oldLink | Out-Null
+                    }
+
+                    $dest = Join-Path $appdir $oldVersion
+                    if (($oldVersion -eq $version) -or (Test-Path $dest)) {
+                        $dest = Get-UniqueDirectoryPath (Join-Path $appdir "_$oldVersion.old")
+                    }
+                } else {
+                    $dest = Get-UniqueDirectoryPath (Join-Path $appdir '_current.old')
+                }
+
+                Move-Item -LiteralPath $currentdir -Destination $dest -Force
+            }
+        }
+
+        if (!(Test-Path $versiondir)) {
+            abort "Error: Version directory '$(friendly_path $versiondir)' is missing."
+        }
+
+        # Move the requested version directory to 'current'
+        Move-Item -LiteralPath $versiondir -Destination $currentdir -Force
+
+        # Create version junction -> current directory
+        New-DirectoryJunction $versiondir $currentdir | Out-Null
+        attrib $versiondir +R /L
+
+        return $currentdir
+    } else {
+        Write-Host "Linking $(friendly_path $currentdir) => $(friendly_path $versiondir)"
+
+        # If current exists and is a directory (reverse layout), move it back to the active version directory first.
+        if ((Test-Path $currentdir) -and [String]::IsNullOrEmpty((Get-DirectoryLinkType $currentdir))) {
+            $oldVersion = Find-ActiveVersionFromReverseLayout $appdir $currentdir
+            if (!$oldVersion) {
+                $oldVersion = Get-CurrentVersionFromManifest $currentdir
+            }
+
+            if ($oldVersion) {
+                $oldLink = Join-Path $appdir $oldVersion
+                if ((Test-Path $oldLink) -and -not [String]::IsNullOrEmpty((Get-DirectoryLinkType $oldLink))) {
+                    Remove-DirectoryLink $oldLink | Out-Null
+                }
+
+                $dest = Join-Path $appdir $oldVersion
+                if (Test-Path $dest) {
+                    $dest = Get-UniqueDirectoryPath (Join-Path $appdir "_$oldVersion.old")
+                }
+            } else {
+                $dest = Get-UniqueDirectoryPath (Join-Path $appdir '_current.old')
+            }
+
+            Move-Item -LiteralPath $currentdir -Destination $dest -Force
+        }
+
+        if (Test-Path $currentdir) {
+            # remove the junction
+            if (-not [String]::IsNullOrEmpty((Get-DirectoryLinkType $currentdir))) {
+                Remove-DirectoryLink $currentdir | Out-Null
+            } else {
+                # directory already handled above; but keep it safe
+                Remove-Item -LiteralPath $currentdir -Recurse -Force -ErrorAction Stop
+            }
+        }
+
+        # Ensure we point current to a real version directory (not a link)
+        if ((Test-Path $versiondir) -and -not [String]::IsNullOrEmpty((Get-DirectoryLinkType $versiondir))) {
+            abort "Error: Version directory '$(friendly_path $versiondir)' is a link. Please run 'scoop reset $version' to repair."
+        }
+
+        New-DirectoryJunction $currentdir $versiondir | Out-Null
+        attrib $currentdir +R /L
+        return $currentdir
+    }
 }
 
 # Removes the directory junction for [app]/current which
@@ -264,18 +468,21 @@ function link_current($versiondir) {
 # otherwise the normal version directory.
 function unlink_current($versiondir) {
     if (get_config NO_JUNCTION) { return $versiondir.ToString() }
-    $currentdir = "$(Split-Path $versiondir)\current"
+
+    $versiondir = $versiondir.ToString()
+    $appdir = Get-AppDirForCurrentOps $versiondir
+    $currentdir = Join-Path $appdir 'current'
 
     if (Test-Path $currentdir) {
         Write-Host "Unlinking $(friendly_path $currentdir)"
 
-        # remove read-only attribute on link
-        attrib $currentdir -R /L
-
-        # remove the junction
-        Remove-Item $currentdir -Recurse -Force -ErrorAction Stop
+        # Only remove the link if 'current' is a link. In reverse_junction layout 'current' is a directory.
+        if (-not [String]::IsNullOrEmpty((Get-DirectoryLinkType $currentdir))) {
+            Remove-DirectoryLink $currentdir | Out-Null
+        }
         return $currentdir
     }
+
     return $versiondir
 }
 

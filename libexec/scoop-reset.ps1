@@ -64,7 +64,7 @@ $apps | ForEach-Object {
 
     write-host "Resetting $app ($version)."
 
-    $dir = Convert-Path (versiondir $app $version $global)
+    $dir = versiondir $app $version $global
     $original_dir = $dir
     $persist_dir = persistdir $app $global
 
@@ -78,6 +78,10 @@ $apps | ForEach-Object {
     $architecture = $install.architecture
 
     $dir = link_current $dir
+    if ((get_config REVERSE_JUNCTION $false) -and !(get_config NO_JUNCTION)) {
+        # In reverse_junction layout, 'current' is the real directory.
+        $original_dir = $dir
+    }
     create_shims $manifest $dir $global $architecture
     create_startmenu_shortcuts $manifest $dir $global $architecture
     # unset all potential old env before re-adding
