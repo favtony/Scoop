@@ -91,10 +91,12 @@ if (!$apps) { exit 0 }
         try {
             # unlink all potential old link before doing recursive Remove-Item
             unlink_persist_data $manifest $dir
-            Remove-Item $dir -Recurse -Force -ErrorAction Stop
+            if (-not (Remove-DirectoryLink $dir)) {
+                Remove-Item $dir -Recurse -Force -ErrorAction Stop
+            }
         } catch {
             if (Test-Path $dir) {
-                error "Couldn't remove '$(friendly_path $dir)'; it may be in use."
+                error "Couldn't remove '$(friendly_path $dir): $_'; it may be in use1."
                 continue
             }
         }
@@ -111,7 +113,7 @@ if (!$apps) { exit 0 }
             unlink_persist_data $manifest $dir
             Remove-Item $dir -Recurse -Force -ErrorAction Stop
         } catch {
-            error "Couldn't remove '$(friendly_path $dir)'; it may be in use."
+            error "Couldn't remove '$(friendly_path $dir)'; it may be in use2."
             continue app_loop
         }
     }
@@ -143,7 +145,7 @@ if (!$apps) { exit 0 }
             try {
                 Remove-Item $persist_dir -Recurse -Force -ErrorAction Stop
             } catch {
-                error "Couldn't remove '$(friendly_path $persist_dir)'; it may be in use."
+                error "Couldn't remove '$(friendly_path $persist_dir)'; it may be in use3."
                 continue
             }
         }
